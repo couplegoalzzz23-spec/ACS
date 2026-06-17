@@ -9,7 +9,7 @@ st.set_page_config(page_title="Dashboard ACS BMKG", layout="wide", page_icon="�
 # --- Judul Utama ---
 st.title("🌤️ Dashboard Aerodrome Climatological Summary (ACS)")
 st.markdown("Aplikasi Interaktif Analisis Data Klimatologi Operasional Penerbangan Tahun 2021-2025.")
-st.hr()
+st.divider() # PERBAIKAN: Menggunakan st.divider() sebagai pengganti st.hr()
 
 # --- Sidebar Navigasi Parameter ---
 st.sidebar.header("Navigasi Analisis")
@@ -140,8 +140,7 @@ try:
         if pilihan_bulan in xls:
             df_ws = xls[pilihan_bulan]
             
-            # Asumsi Struktur ACS Wind: Baris berisi arah mata angin (N, NE, E, dll), Kolom berisi kelas kecepatan
-            # Kita bersihkan data kolom pertama sebagai indeks arah
+            # Bersihkan data kolom pertama sebagai indeks arah
             df_ws = df_ws.dropna(subset=[df_ws.columns[0]])
             arah_angin = df_ws.iloc[:, 0].astype(str).tolist()
             kelas_kecepatan = [col for col in df_ws.columns if col != df_ws.columns[0]]
@@ -154,7 +153,6 @@ try:
             # --- Plotting Windrose Menggunakan Proyeksi Polar Matplotlib ---
             N_arah = len(arah_angin)
             angles = np.linspace(0, 2 * np.pi, N_arah, endpoint=False).tolist()
-            angles += angles[:1] # Penutup lingkaran
             
             fig, ax = plt.subplots(figsize=(8, 8), subplot_kw=dict(projection='polar'))
             ax.set_theta_thetainterp('no-clipping')
@@ -162,15 +160,14 @@ try:
             ax.set_theta_offset(np.pi / 2.0) # Utara di atas
             
             # Set label arah mata angin pada koordinat polar
-            plt.xticks(np.linspace(0, 2*np.pi, N_arah, endpoint=False), arah_angin, fontsize=10, fontweight='bold')
+            plt.xticks(angles, arah_angin, fontsize=10, fontweight='bold')
             
             # Membuat susunan stacked bar untuk mewakili kelas kecepatan angin
-            bottom_bars = np.zeros(N_arah + 1)
+            bottom_bars = np.zeros(N_arah)
             
             for idx, kelas in enumerate(kelas_kecepatan):
                 # Ambil data persentase kejadian untuk kelas kecepatan tertentu, bulatkan 2 desimal
                 values = df_ws[kelas].astype(float).round(2).tolist()
-                values += values[:1] # Penutup lingkaran
                 
                 ax.bar(
                     angles, values, 
@@ -182,7 +179,7 @@ try:
                 )
                 bottom_bars += np.array(values)
                 
-            ax.legend(title="Kecepatan Angin (Knots)", loc="lower left", bbox_to_anchor=(1.1, 0.1))
+            ax.legend(title="Kecepatan Angin", loc="lower left", bbox_to_anchor=(1.1, 0.1))
             plt.tight_layout()
             st.pyplot(fig)
             
