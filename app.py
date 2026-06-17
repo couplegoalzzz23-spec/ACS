@@ -3,81 +3,78 @@ import pandas as pd
 import plotly.express as px
 import os
 
-# --- 1. Konfigurasi Dasar ---
+# Konfigurasi Halaman
 st.set_page_config(page_title="Dashboard ACS Terintegrasi", layout="wide", page_icon="🌤️")
 
-# folder data di repositori Anda
-DATA_DIR = "data" 
-
-# Kamus Konfigurasi: Anda cukup menambah baris di sini untuk parameter baru
-DATA_CONFIG = {
-    "Temperatur": {"file": "rata_rata_persentase_temperature_2021_2025.xlsx", "unit": "°C"},
-    "Visibility": {"file": "rata_rata_persentase_visibility_2021_2025.xlsx", "unit": "Meter"},
-    "Cloud Height (HS)": {"file": "rata_rata_persentase_hs_2021_2025.xlsx", "unit": "ft"},
-    "Relative Humidity": {"file": "rata_rata_jumlah_kejadian_masuk_rh_2021_2025.xlsx", "unit": "%"},
-    "Temp Max/Min": {"file": "rata_rata_jumlah_kejadian_masuk_tmaxmin_2021_2025.xlsx", "unit": "°C"}
+# --- KONFIGURASI ---
+DATA_DIR = "data"
+# Pastikan nama file di bawah sama PERSIS dengan yang ada di folder 'data'
+DATA_MAP = {
+    "Temperature": "rata_rata_persentase_temperature_2021_2025.xlsx",
+    "Visibility": "rata_rata_persentase_visibility_2021_2025.xlsx",
+    "Cloud Height (HS)": "rata_rata_persentase_hs_2021_2025.xlsx",
+    "Wind Speed (WS)": "rata_rata_persentase_ws_2021_2025.xlsx",
+    "Relative Humidity": "rata_rata_jumlah_kejadian_masuk_rh_2021_2025.xlsx",
+    "Temp Max/Min": "rata_rata_jumlah_kejadian_masuk_tmaxmin_2021_2025.xlsx"
 }
 
 months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 
           'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember']
 
-# --- 2. Fungsi Parser (Mesin Utama) ---
-@st.cache_data
-def load_climate_data(file_name):
-    path = os.path.join(DATA_DIR, file_name)
-    if not os.path.exists(path):
+def load_data(file_path):
+    if not os.path.exists(file_path):
         return None, "File tidak ditemukan."
     
     try:
-        xls = pd.ExcelFile(path)
+        xls = pd.ExcelFile(file_path)
         all_data = {}
-        categories = []
-
+        
         for month in months:
             if month in xls.sheet_names:
-                df = pd.read_excel(path, sheet_name=month, header=None)
+                df = pd.read_excel(file_path, sheet_name=month, header=None)
                 
-                # Cari baris "(GMT)" sebagai header kategori
-                header_idx = df[df[0].astype(str).str.contains("\(GMT\)", case=False, na=False)].index
-                if not header_idx.empty:
-                    r = header_idx[0]
-                    # Ambil kategori
-                    current_cats = [str(c) for c in df.iloc[r, 1:] if pd.notna(c)]
-                    if not categories: categories = current_cats
-                    
-                    # Cari baris "MEAN" sebagai data
-                    mean_idx = df[df[0].astype(str).str.upper() == 'MEAN'].index
-                    if not mean_idx.empty:
-                        data_row = df.iloc[mean_idx[-1], 1:].values
-                        # Konversi data ke angka
-                        all_data[month] = pd.to_numeric(pd.Series(data_row), errors='coerce').fillna(0).tolist()
-            
-        return pd.DataFrame(all_data, index=categories).T, None
+                # Cari baris yang mengandung 'MEAN' secara case-insensitive
+                # Kita gunakan .str.contains(..., case=False) agar lebih fleksibel
+                mask = df[0].astype(str).str.contains("MEAN", case=False, na=False)
+                mean_rows = df[mask].index
+                
+                if not mean_rows.empty:
+                    # Ambil baris terakhir yang mengandung kata MEAN
+                    row_idx = mean_rows[-1]
+                    # Ambil data dari kolom 1 ke kanan
+                    data = df.iloc[row_idx, 1:].tolist()
+                    # Bersihkan data: jadikan angka, jika error jadikan 0
+                    all_data[month] = [float(pd.to_numeric(x, errors='coerce')) if pd.notna(x) else 0.0 for x in data]
+                else:
+                    # Jika tidak ketemu 'MEAN', beri data kosong agar script tidak crash
+                    all_data[month] = [0.0] * 5 
+        
+        return pd.DataFrame(all_data).T, None
     except Exception as e:
         return None, str(e)
 
-# --- 3. Antarmuka Dashboard ---
-st.title("🌤️ Dashboard Aerodrome Climatological Summary (ACS)")
+# --- ANTARMUKA ---
+st.title("🌤️ Dashboard ACS Terintegrasi")
 st.markdown("Analisis Klimatologi Data Operasional 2021-2025.")
-st.divider()
+st.divider() # Mengganti st.hr() yang salah
 
-# Sidebar Navigasi
-param_key = st.sidebar.selectbox("Pilih Parameter:", list(DATA_CONFIG.keys()))
-file_name = DATA_CONFIG[param_key]["file"]
+option = st.sidebar.selectbox("Pilih Parameter:", list(DATA_MAP.keys()))
+file_name = DATA_MAP[option]
+file_path = os.path.join(DATA_DIR, file_name)
 
-# Proses Data
-df, error = load_climate_data(file_name)
+df, error = load_data(file_path)
 
 if error:
-    st.error(f"Error pada file {file_name}: {error}")
-    st.info("Pastikan file berada di folder `data/` dan formatnya sesuai standar.")
+    st.error(f"Terjadi kesalahan: {error}")
+    st.info("Pastikan file sudah terupload di folder 'data' di GitHub Anda.")
 else:
-    # Visualisasi
-    st.subheader(f"Grafik {param_key}")
-    fig = px.line(df, markers=True, labels={'index': 'Bulan', 'value': 'Persentase (%)', 'variable': 'Kategori'})
-    fig.update_layout(hovermode="x unified", height=500)
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Tabel
-    st.subheader("Data Tabel")
-    st.dataframe(df.style.format("{:.2f}"), use_container_width=True)
+    if df.empty:
+        st.warning("Data berhasil dimuat tetapi tampak kosong. Periksa apakah baris 'MEAN' ada di file Excel.")
+    else:
+        st.subheader(f"Grafik {option}")
+        fig = px.line(df, markers=True)
+        fig.update_layout(hovermode="x unified", height=500)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        st.subheader("Data Tabel")
+        st.dataframe(df.style.format("{:.2f}"))
