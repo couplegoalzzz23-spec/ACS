@@ -20,14 +20,14 @@ months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
           'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember']
 
 # ==========================================
-# 2. FUNGSI EKSTRAKSI DATA AKURAT & PRESISI
+# 2. FUNGSI EKSTRAKSI DATA SUPER AKURAT
 # ==========================================
 @st.cache_data(show_spinner=False)
 def load_acs_generic_data(file_path):
     """
-    Membaca file Excel ACS dengan pencarian jangkar (anchor) baris header 
-    dan baris rata-rata secara presisi untuk menjamin tidak ada kolom teks 
-    seperti '< 1800' yang hilang.
+    Membaca file Excel ACS menggunakan algoritma "Kepadatan Kolom".
+    Sistem akan mencari baris yang memiliki rentang kategori terbanyak,
+    sehingga tidak mungkin tertukar dengan judul tabel atau baris kosong.
     """
     if not os.path.exists(file_path):
         return None, None
@@ -38,52 +38,39 @@ def load_acs_generic_data(file_path):
     except Exception:
         return None, None
 
-    # --- TAHAP 1: MENGUNCI STRUKTUR HEADER SECARA PRESISI ---
+    # --- TAHAP 1: MENGUNCI BARIS KATEGORI (HEADER) ---
     sample_sheet = next((s for s in actual_sheets if any(m.lower() in s.lower() for m in months)), actual_sheets[0])
     df_sample = pd.read_excel(file_path, sheet_name=sample_sheet, header=None)
     
+    max_filled_cols = 0
     header_row_idx = -1
-    
-    # Metode Utama: Cari baris yang kolom pertamanya mengandung indikator waktu baku
-    for r in range(min(20, len(df_sample))):
-        val0 = str(df_sample.iloc[r, 0]).strip().upper()
-        if any(k in val0 for k in ['(GMT)', 'GMT', 'UTC', 'JAM', 'WIB', 'HOUR']):
-            header_row_idx = r
-            break
-            
-    # Metode Cadangan 1: Cari kata kunci waktu di seluruh sel pada 15 baris pertama
-    if header_row_idx == -1:
-        for r in range(min(15, len(df_sample))):
-            row_vals = df_sample.iloc[r].dropna().astype(str).str.upper().tolist()
-            if any(any(k in cell for k in ['(GMT)', 'GMT', 'UTC', 'JAM']) for cell in row_vals):
-                header_row_idx = r
-                break
-                
-    # Metode Cadangan 2: Cari baris awal jam data (0 atau 00) dan ambil baris di atasnya
-    if header_row_idx == -1:
-        for r in range(len(df_sample)):
-            val0 = str(df_sample.iloc[r, 0]).strip()
-            if val0 in ['0', '00', '1', '01']:
-                header_row_idx = r - 1
-                break
-                
-    # Jika seluruh pencarian gagal, gunakan batas default standar acuan instansi
-    if header_row_idx == -1:
-        header_row_idx = 4
-
-    # Petakan indeks kolom asli ke nama kategorinya agar urutan tidak tertukar
     category_map = {}
-    for c in range(1, len(df_sample.columns)):
-        val = df_sample.iloc[header_row_idx, c]
-        if pd.notna(val) and str(val).strip() != '':
-            category_map[c] = str(val).strip()
-            
-    categories = list(category_map.values())
 
-    if not categories:
+    # Scan 15 baris pertama untuk mencari baris dengan kolom data terbanyak (mulai dari kolom ke-1/indeks 1)
+    for r in range(min(15, len(df_sample))):
+        temp_map = {}
+        filled_count = 0
+        for c in range(1, len(df_sample.columns)):
+            val = str(df_sample.iloc[r, c]).strip()
+            # Hitung kolom jika isinya bukan kosong dan bukan 'nan'
+            if val and val.lower() != 'nan':
+                filled_count += 1
+                temp_map[c] = val
+        
+        # Jika baris ini memiliki lebih banyak kolom terisi daripada baris sebelumnya, jadikan ini sebagai header
+        if filled_count > max_filled_cols:
+            max_filled_cols = filled_count
+            header_row_idx = r
+            category_map = temp_map
+
+    # Jika gagal mendeteksi (hampir mustahil untuk file ACS), hentikan proses
+    if not category_map:
         return None, None
 
-    # --- TAHAP 2: EKSTRAKSI NILAI SUMMARY BERDASARKAN KATEGORI ---
+    # Rapikan nama kategori agar siap dijadikan kolom pada tabel/grafik
+    categories = list(category_map.values())
+
+    # --- TAHAP 2: EKSTRAKSI NILAI SUMMARY (MEAN/RATA-RATA) ---
     data_kategori = {k: [] for k in categories}
     
     for month in months:
@@ -93,37 +80,32 @@ def load_acs_generic_data(file_path):
             try:
                 df = pd.read_excel(file_path, sheet_name=matched_sheet, header=None)
                 
-                # Cari baris nilai rata-rata bulanan (Scan dari bawah ke atas)
                 target_row_idx = -1
-                for r in reversed(df.index):
-                    val0 = str(df.iloc[r, 0]).strip().upper()
-                    if any(k in val0 for k in ['MEAN', 'RATA', 'AVERAGE', 'AVG']):
+                
+                # Scan dari bawah ke atas (20 baris terakhir) mencari kata "MEAN", "RATA", dll di 3 kolom pertama
+                for r in range(len(df)-1, max(-1, len(df)-20), -1):
+                    row_text = " ".join(str(x).upper() for x in df.iloc[r, 0:3].values)
+                    if any(k in row_text for k in ['MEAN', 'RATA', 'AVERAGE', 'AVG']):
                         target_row_idx = r
                         break
-                        
-                # Jika label 'MEAN' hilang, cari baris terbawah yang berisi data numerik valid
+                
+                # Fallback: Jika tidak ada kata MEAN, cari baris paling bawah yang berisi angka
                 if target_row_idx == -1:
-                    for r in reversed(df.index):
-                        has_numeric = False
-                        for c in category_map.keys():
-                            if c < len(df.columns):
-                                val = df.iloc[r, c]
-                                if pd.notna(val) and isinstance(val, (int, float)):
-                                    has_numeric = True
-                                    break
-                        if has_numeric:
+                    first_col_idx = list(category_map.keys())[0]
+                    for r in range(len(df)-1, max(-1, len(df)-20), -1):
+                        val = df.iloc[r, first_col_idx]
+                        if pd.notna(val) and isinstance(val, (int, float)):
                             target_row_idx = r
                             break
                 
-                # Masukkan nilai ke dalam struktur data dashboard
+                # Ekstrak nilai berdasarkan indeks kolom (category_map) yang sudah dikunci
                 if target_row_idx != -1:
-                    for c, kategori in category_map.items():
-                        if c < len(df.columns):
-                            val = df.iloc[target_row_idx, c]
+                    for c_idx, kategori in category_map.items():
+                        if c_idx < len(df.columns):
+                            val = df.iloc[target_row_idx, c_idx]
                             try:
                                 val = float(val)
-                                if pd.isna(val): 
-                                    val = 0.0
+                                if pd.isna(val): val = 0.0
                             except (ValueError, TypeError):
                                 val = 0.0
                             data_kategori[kategori].append(round(val, 2))
@@ -152,7 +134,7 @@ def render_parameter_ui(file_name, title, y_label, variable_label):
         df, categories = load_acs_generic_data(file_path)
     
     if df is not None and not df.empty:
-        # Pembuatan Grafik Garis Interaktif menggunakan Plotly Express
+        # Grafik Garis Interaktif menggunakan Plotly
         fig = px.line(
             df, 
             x=df.index, 
@@ -170,12 +152,12 @@ def render_parameter_ui(file_name, title, y_label, variable_label):
         )
         st.plotly_chart(fig, use_container_width=True)
         
-        # Pembuatan Tabel Historis di Bawah Grafik (Persis Desain app.py 57)
+        # Tabel Historis
         st.markdown("#### Tabel Data Historis")
         st.dataframe(df.style.format("{:.2f}"), use_container_width=True)
     else:
         st.error(f"⚠️ Gagal memproses data dari file: `{file_name}`")
-        st.info("💡 Pastikan file Excel tersebut berada di dalam direktori `data/` pada repositori GitHub Anda.")
+        st.info("💡 Pastikan file Excel tersebut berada di dalam direktori `data/` pada repositori GitHub Anda dan bukan merupakan file dummy.")
 
 
 # ==========================================
