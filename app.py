@@ -9,8 +9,7 @@ import os
 st.set_page_config(
     page_title="Dashboard ACS Terintegrasi", 
     layout="wide", 
-    page_icon="🌤️",
-    initial_sidebar_state="expanded"
+    page_icon="🌤️"
 )
 
 st.title("🌤️ Dashboard Aerodrome Climatological Summary (ACS)")
@@ -21,13 +20,13 @@ months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
           'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember']
 
 # ==========================================
-# 2. FUNGSI EKSTRAKSI DATA (CACHED)
+# 2. FUNGSI EKSTRAKSI DATA (TAHAN BANTING)
 # ==========================================
 @st.cache_data(show_spinner=False)
 def load_acs_generic_data(file_path):
     """
-    Fungsi tahan banting untuk membaca data Excel.
-    Menggunakan caching agar tidak perlu reload data berulang kali saat pindah tab.
+    Fungsi ini 100% dinamis. Akan men-scan secara cerdas baris mana yang 
+    merupakan header kategori dan baris mana yang merupakan nilai rata-rata.
     """
     if not os.path.exists(file_path):
         return None, None
@@ -35,100 +34,123 @@ def load_acs_generic_data(file_path):
     try:
         xls = pd.ExcelFile(file_path)
         actual_sheets = xls.sheet_names
-    except Exception as e:
+    except Exception:
         return None, None
 
-    # Cari sheet bulan pertama yang tersedia untuk mendeteksi kategori
-    sample_sheet = next((s for s in actual_sheets if s.strip().lower() in [m.lower() for m in months]), actual_sheets[0])
+    # --- TAHAP 1: MENCARI HEADER / KATEGORI RENTANG ---
+    # Ambil sheet bulan pertama yang valid untuk di-scan strukturnya
+    sample_sheet = next((s for s in actual_sheets if any(m.lower() in s.lower() for m in months)), actual_sheets[0])
     df_sample = pd.read_excel(file_path, sheet_name=sample_sheet, header=None)
     
-    # Kunci pencarian hanya pada baris yang kolom pertamanya adalah '(GMT)'
-    header_row_idx = df_sample[df_sample[0].astype(str).str.strip().str.upper() == '(GMT)'].index
-    
-    if len(header_row_idx) > 0:
-        r = header_row_idx[0]
-        # Mengambil semua nama rentang kategori (kolom 1 sampai akhir)
-        categories = [str(df_sample.iloc[r, c]).strip() for c in range(1, len(df_sample.columns)) 
-                      if pd.notna(df_sample.iloc[r, c]) and str(df_sample.iloc[r, c]).strip() != '']
+    best_row_idx = 0
+    max_cols = 0
+    # Scan 15 baris pertama untuk mencari baris yang memiliki label rentang terbanyak
+    for r in range(min(15, len(df_sample))):
+        cols_filled = df_sample.iloc[r, 1:].dropna().astype(str).str.strip()
+        cols_filled = cols_filled[cols_filled != '']
+        if len(cols_filled) > max_cols:
+            max_cols = len(cols_filled)
+            best_row_idx = r
+            
+    if max_cols > 0:
+        categories = [str(val).strip() for val in df_sample.iloc[best_row_idx, 1:] if pd.notna(val) and str(val).strip() != '']
     else:
-        # Pilihan cadangan jika standar (GMT) tidak ditemukan
-        categories = [f"Kategori {i}" for i in range(1, len(df_sample.columns))]
+        categories = [f"Rentang {i}" for i in range(1, len(df_sample.columns))]
 
-    # Buat wadah data untuk grafik
+    # Pastikan tidak ada nama kategori yang duplikat
+    unique_categories = []
+    for c in categories:
+        if c not in unique_categories:
+            unique_categories.append(c)
+        else:
+            unique_categories.append(c + " (copy)")
+    categories = unique_categories
+
+    # --- TAHAP 2: EKSTRAKSI NILAI DARI SETIAP BULAN ---
     data_kategori = {k: [] for k in categories}
     
     for month in months:
-        matched_sheet = next((s for s in actual_sheets if s.strip().lower() == month.lower()), None)
+        matched_sheet = next((s for s in actual_sheets if month.lower() in s.lower()), None)
         
         if matched_sheet:
             try:
                 df = pd.read_excel(file_path, sheet_name=matched_sheet, header=None)
-                # Cari baris MEAN periode gabungan 2021-2025 (paling bawah)
-                mean_rows = df[df[0].astype(str).str.strip().str.upper() == 'MEAN'].index.tolist()
                 
-                if mean_rows:
-                    target_row = mean_rows[-1]
-                    for idx, kategori in enumerate(categories, start=1):
-                        if idx < len(df.columns):
-                            val = df.iloc[target_row, idx]
-                            # Menghapus data anomali atau kosong
-                            if pd.isna(val) or (isinstance(val, (int, float)) and val > 100):
+                # Cari baris rata-rata (Scan dari bawah ke atas)
+                target_row = -1
+                for idx in reversed(df.index):
+                    val0 = str(df.iloc[idx, 0]).strip().upper()
+                    if any(keyword in val0 for keyword in ['MEAN', 'RATA-RATA', 'RATA RATA', 'RATA2', 'AVERAGE']):
+                        target_row = idx
+                        break
+                        
+                # Fallback Cerdas: Jika kata 'Mean/Rata-rata' tidak ditemukan, 
+                # ambil baris paling bawah yang mengandung angka valid di kolom kedua.
+                if target_row == -1:
+                    for idx in reversed(df.index):
+                        val1 = df.iloc[idx, 1]
+                        if pd.notna(val1) and isinstance(val1, (int, float)):
+                            target_row = idx
+                            break
+                
+                # Masukkan data ke array
+                if target_row != -1:
+                    for col_idx, kategori in enumerate(categories, start=1):
+                        if col_idx < len(df.columns):
+                            val = df.iloc[target_row, col_idx]
+                            try:
+                                val = float(val)
+                                if pd.isna(val): val = 0.0
+                            except (ValueError, TypeError):
                                 val = 0.0
-                            data_kategori[kategori].append(round(float(val), 2))
+                            data_kategori[kategori].append(round(val, 2))
                         else:
                             data_kategori[kategori].append(0.0)
                 else:
-                    for kategori in categories: data_kategori[kategori].append(0.0)
+                    for k in categories: data_kategori[k].append(0.0)
+                    
             except Exception:
-                for kategori in categories: data_kategori[kategori].append(0.0)
+                for k in categories: data_kategori[k].append(0.0)
         else:
-            for kategori in categories: data_kategori[kategori].append(0.0)
+            for k in categories: data_kategori[k].append(0.0)
             
     return pd.DataFrame(data_kategori, index=months), categories
 
 
 # ==========================================
-# 3. FUNGSI PEMBUAT UI (MODULAR)
+# 3. FUNGSI RENDER TAMPILAN
 # ==========================================
 def render_parameter_ui(file_name, title, y_label, variable_label):
-    """
-    Fungsi untuk merender grafik dan tabel secara dinamis.
-    Ini mencegah penulisan kode berulang dan mempermudah debugging.
-    """
-    # Arahkan path langsung ke dalam folder 'data'
     file_path = os.path.join("data", file_name)
     
     st.markdown(f"### {title}")
     
-    with st.spinner('Memuat data...'):
+    with st.spinner('Mengekstrak data dari Excel...'):
         df, categories = load_acs_generic_data(file_path)
     
     if df is not None and not df.empty:
-        # Membuat Grafik Plotly
+        # Grafik
         fig = px.line(df, x=df.index, y=df.columns, markers=True,
                       labels={'index': 'Bulan', 'value': y_label, 'variable': variable_label})
         fig.update_layout(
             hovermode="x unified", 
             plot_bgcolor='rgba(0,0,0,0)', 
             height=500,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            legend=dict(title=variable_label)
         )
-        
-        # Menampilkan Grafik
         st.plotly_chart(fig, use_container_width=True)
         
-        # Menampilkan Tabel
+        # Tabel
         st.markdown("#### Tabel Data Historis")
         st.dataframe(df.style.format("{:.2f}"), use_container_width=True)
     else:
-        st.error(f"⚠️ Gagal memuat data untuk {title}.")
-        st.info(f"💡 Pastikan file `{file_name}` sudah terunggah ke dalam folder `data/` di GitHub Anda dan formatnya sesuai standar ACS yang ditetapkan.")
+        st.error(f"⚠️ Gagal memuat data dari file: `{file_name}`")
+        st.info("💡 Pastikan file tersebut ada di folder `data/` pada repositori GitHub Anda.")
 
 
 # ==========================================
-# 4. SISTEM TAB & NAVIGASI
+# 4. NAVIGASI TAB
 # ==========================================
-# Membuat 6 Tab sesuai dengan file yang ada di folder 'data' GitHub
 tabs = st.tabs([
     "🌡️ Temperatur", 
     "👁️ Visibility", 
@@ -138,7 +160,6 @@ tabs = st.tabs([
     "📈 Maks & Min Temp"
 ])
 
-# Mapping setiap tab dengan fungsinya masing-masing
 with tabs[0]:
     render_parameter_ui(
         file_name='rata_rata_persentase_temperature_2021_2025.xlsx',
