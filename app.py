@@ -3,219 +3,190 @@ import pandas as pd
 import plotly.express as px
 import os
 
-# ==========================================
-# 1. KONFIGURASI HALAMAN WEB
-# ==========================================
+# 1. Konfigurasi Halaman Web Dashboard
 st.set_page_config(
-    page_title="Dashboard ACS Terintegrasi", 
+    page_title="Dashboard ACS Terintegrasi BMKG", 
     layout="wide", 
     page_icon="🌤️"
 )
 
-st.title("🌤️ Dashboard Aerodrome Climatological Summary (ACS)")
-st.subheader("Analisis Klimatologi Cuaca Operasional Periode 2021-2025")
+st.title("📊 Dashboard Aerodrome Climatological Summary (ACS)")
+st.subheader("Analisis Klimatologi Cuaca Operasional Pangkalan Udara Periode 2021-2025")
 st.markdown("---")
 
+# Daftar bulan standar untuk sinkronisasi data sheet dan indeks
 months = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 
           'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember']
 
-# ==========================================
-# 2. FUNGSI EKSTRAKSI DATA SUPER AKURAT
-# ==========================================
-@st.cache_data(show_spinner=False)
-def load_acs_generic_data(file_path):
-    """
-    Membaca file Excel ACS menggunakan algoritma "Kepadatan Kolom".
-    Sistem akan mencari baris yang memiliki rentang kategori terbanyak,
-    sehingga tidak mungkin tertukar dengan judul tabel atau baris kosong.
-    """
+# 2. Fungsi Universal Pembaca Data ACS (Akurat & Tahan Banting)
+@st.cache_data
+def load_acs_generic_data(file_name):
+    # Mengarah langsung ke folder 'data' sesuai struktur di GitHub
+    file_path = os.path.join("data", file_name)
+    
     if not os.path.exists(file_path):
         return None, None
         
     try:
         xls = pd.ExcelFile(file_path)
         actual_sheets = xls.sheet_names
+    except Exception as e:
+        return None, None
+
+    # Mencari sheet bulan pertama yang valid untuk mendeteksi struktur kolom/kategori
+    sample_sheet = next((s for s in actual_sheets if s.strip().lower() in [m.lower() for m in months]), actual_sheets[0])
+    try:
+        df_sample = pd.read_excel(file_path, sheet_name=sample_sheet, header=None)
     except Exception:
         return None, None
-
-    # --- TAHAP 1: MENGUNCI BARIS KATEGORI (HEADER) ---
-    sample_sheet = next((s for s in actual_sheets if any(m.lower() in s.lower() for m in months)), actual_sheets[0])
-    df_sample = pd.read_excel(file_path, sheet_name=sample_sheet, header=None)
     
-    max_filled_cols = 0
-    header_row_idx = -1
-    category_map = {}
+    # Mengunci pencarian baris header berdasarkan letak teks '(GMT)'
+    header_row_idx = df_sample[df_sample[0].astype(str).str.strip().str.upper() == '(GMT)'].index
+    
+    if len(header_row_idx) > 0:
+        r = header_row_idx[0]
+        # Mengambil nama rentang kategori (kolom 1 hingga akhir)
+        categories = [str(df_sample.iloc[r, c]).strip() for c in range(1, len(df_sample.columns)) 
+                      if pd.notna(df_sample.iloc[r, c]) and str(df_sample.iloc[r, c]).strip() != '']
+    else:
+        # Fallback/Cadangan jika teks (GMT) tidak ditemukan
+        categories = [f"Kategori {i}" for i in range(1, len(df_sample.columns))]
 
-    # Scan 15 baris pertama untuk mencari baris dengan kolom data terbanyak (mulai dari kolom ke-1/indeks 1)
-    for r in range(min(15, len(df_sample))):
-        temp_map = {}
-        filled_count = 0
-        for c in range(1, len(df_sample.columns)):
-            val = str(df_sample.iloc[r, c]).strip()
-            # Hitung kolom jika isinya bukan kosong dan bukan 'nan'
-            if val and val.lower() != 'nan':
-                filled_count += 1
-                temp_map[c] = val
-        
-        # Jika baris ini memiliki lebih banyak kolom terisi daripada baris sebelumnya, jadikan ini sebagai header
-        if filled_count > max_filled_cols:
-            max_filled_cols = filled_count
-            header_row_idx = r
-            category_map = temp_map
-
-    # Jika gagal mendeteksi (hampir mustahil untuk file ACS), hentikan proses
-    if not category_map:
-        return None, None
-
-    # Rapikan nama kategori agar siap dijadikan kolom pada tabel/grafik
-    categories = list(category_map.values())
-
-    # --- TAHAP 2: EKSTRAKSI NILAI SUMMARY (MEAN/RATA-RATA) ---
+    # Inisialisasi wadah data
     data_kategori = {k: [] for k in categories}
     
+    # Ekstraksi nilai baris 'MEAN' dari setiap sheet bulan
     for month in months:
-        matched_sheet = next((s for s in actual_sheets if month.lower() in s.lower()), None)
+        matched_sheet = next((s for s in actual_sheets if s.strip().lower() == month.lower()), None)
         
         if matched_sheet:
             try:
                 df = pd.read_excel(file_path, sheet_name=matched_sheet, header=None)
+                # Cari baris nilai rata-rata/MEAN gabungan 2021-2025
+                mean_rows = df[df[0].astype(str).str.strip().str.upper() == 'MEAN'].index.tolist()
                 
-                target_row_idx = -1
-                
-                # Scan dari bawah ke atas (20 baris terakhir) mencari kata "MEAN", "RATA", dll di 3 kolom pertama
-                for r in range(len(df)-1, max(-1, len(df)-20), -1):
-                    row_text = " ".join(str(x).upper() for x in df.iloc[r, 0:3].values)
-                    if any(k in row_text for k in ['MEAN', 'RATA', 'AVERAGE', 'AVG']):
-                        target_row_idx = r
-                        break
-                
-                # Fallback: Jika tidak ada kata MEAN, cari baris paling bawah yang berisi angka
-                if target_row_idx == -1:
-                    first_col_idx = list(category_map.keys())[0]
-                    for r in range(len(df)-1, max(-1, len(df)-20), -1):
-                        val = df.iloc[r, first_col_idx]
-                        if pd.notna(val) and isinstance(val, (int, float)):
-                            target_row_idx = r
-                            break
-                
-                # Ekstrak nilai berdasarkan indeks kolom (category_map) yang sudah dikunci
-                if target_row_idx != -1:
-                    for c_idx, kategori in category_map.items():
-                        if c_idx < len(df.columns):
-                            val = df.iloc[target_row_idx, c_idx]
-                            try:
-                                val = float(val)
-                                if pd.isna(val): val = 0.0
-                            except (ValueError, TypeError):
+                if mean_rows:
+                    target_row = mean_rows[-1] # Ambil baris MEAN paling bawah
+                    for idx, kategori in enumerate(categories, start=1):
+                        if idx < len(df.columns):
+                            val = df.iloc[target_row, idx]
+                            # Pembersihan data anomali atau kosong
+                            if pd.isna(val) or (isinstance(val, (int, float)) and val > 100):
                                 val = 0.0
-                            data_kategori[kategori].append(round(val, 2))
+                            data_kategori[kategori].append(round(float(val), 2))
                         else:
                             data_kategori[kategori].append(0.0)
                 else:
-                    for k in categories: data_kategori[k].append(0.0)
-                    
+                    for kategori in categories: data_kategori[kategori].append(0.0)
             except Exception:
-                for k in categories: data_kategori[k].append(0.0)
+                for kategori in categories: data_kategori[kategori].append(0.0)
         else:
-            for k in categories: data_kategori[k].append(0.0)
+            for kategori in categories: data_kategori[kategori].append(0.0)
             
-    return pd.DataFrame(data_kategori, index=months), categories
+    df_final = pd.DataFrame(data_kategori, index=months)
+    return df_final, categories
 
+# Fungsi pembantu untuk membuat visualisasi meteogram standar (Line Chart)
+def plot_meteogram(df, title, y_label, var_label):
+    fig = px.line(df, x=df.index, y=df.columns, markers=True,
+                  labels={'index': 'Bulan', 'value': y_label, 'variable': var_label},
+                  template="plotly_white")
+    fig.update_layout(hovermode="x unified", plot_bgcolor='rgba(0,0,0,0)', height=500)
+    return fig
 
-# ==========================================
-# 3. FUNGSI RENDER ANTARMUKA (UI)
-# ==========================================
-def render_parameter_ui(file_name, title, y_label, variable_label):
-    file_path = os.path.join("data", file_name)
-    
-    st.markdown(f"### {title}")
-    
-    with st.spinner('Memproses data klimatologi operasional...'):
-        df, categories = load_acs_generic_data(file_path)
-    
-    if df is not None and not df.empty:
-        # Grafik Garis Interaktif menggunakan Plotly
-        fig = px.line(
-            df, 
-            x=df.index, 
-            y=df.columns, 
-            markers=True,
-            labels={'index': 'Bulan', 'value': y_label, 'variable': variable_label}
-        )
-        fig.update_layout(
-            hovermode="x unified", 
-            plot_bgcolor='rgba(0,0,0,0)', 
-            height=500,
-            legend=dict(title=variable_label, orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            xaxis=dict(showgrid=True, gridcolor='rgba(200,200,200,0.2)'),
-            yaxis=dict(showgrid=True, gridcolor='rgba(200,200,200,0.2)')
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Tabel Historis
-        st.markdown("#### Tabel Data Historis")
-        st.dataframe(df.style.format("{:.2f}"), use_container_width=True)
-    else:
-        st.error(f"⚠️ Gagal memproses data dari file: `{file_name}`")
-        st.info("💡 Pastikan file Excel tersebut berada di dalam direktori `data/` pada repositori GitHub Anda dan bukan merupakan file dummy.")
-
-
-# ==========================================
-# 4. SISTEM NAVIGASI TAB UTAMA
-# ==========================================
+# 3. Membuat Sistem Tab Navigasi untuk 6 Parameter Konten Utama
 tabs = st.tabs([
     "🌡️ Temperatur", 
     "👁️ Visibility", 
     "☁️ Cloud Height (HS)", 
     "💨 Wind Speed (WS)", 
     "💧 Relative Humidity (RH)", 
-    "📈 Maks & Min Temp"
+    "📈 Temp Max & Min"
 ])
 
+# --- TAB 1: TEMPERATUR ---
 with tabs[0]:
-    render_parameter_ui(
-        file_name='rata_rata_persentase_temperature_2021_2025.xlsx',
-        title='Distribusi Persentase Temperatur Bulanan',
-        y_label='Persentase (%)',
-        variable_label='Rentang Suhu (°C)'
-    )
+    st.markdown("### 1. Distribusi Persentase Temperatur Bulanan")
+    file_temp = 'rata_rata_persentase_temperature_2021_2025.xlsx'
+    df_temp, _ = load_acs_generic_data(file_temp)
+    
+    if df_temp is not None and not df_temp.empty:
+        fig_temp = plot_meteogram(df_temp, "Meteogram Temperatur", "Persentase (%)", "Rentang Suhu (°C)")
+        st.plotly_chart(fig_temp, use_container_width=True)
+        st.dataframe(df_temp.style.format("{:.2f}"), use_container_width=True)
+    else:
+        st.info(f"💡 File `data/{file_temp}` tidak ditemukan atau strukturnya tidak sesuai.")
 
+# --- TAB 2: VISIBILITY ---
 with tabs[1]:
-    render_parameter_ui(
-        file_name='rata_rata_persentase_visibility_2021_2025.xlsx',
-        title='Distribusi Persentase Visibility Bulanan',
-        y_label='Persentase (%)',
-        variable_label='Rentang Jarak (m)'
-    )
+    st.markdown("### 2. Distribusi Persentase Visibility Bulanan")
+    file_vis = 'rata_rata_persentase_visibility_2021_2025.xlsx'
+    df_vis, _ = load_acs_generic_data(file_vis)
+    
+    if df_vis is not None and not df_vis.empty:
+        fig_vis = plot_meteogram(df_vis, "Meteogram Visibility", "Persentase (%)", "Jarak Pandang (m)")
+        st.plotly_chart(fig_vis, use_container_width=True)
+        st.dataframe(df_vis.style.format("{:.2f}"), use_container_width=True)
+    else:
+        st.info(f"💡 File `data/{file_vis}` tidak ditemukan atau strukturnya tidak sesuai.")
 
+# --- TAB 3: CLOUD HEIGHT (HS) ---
 with tabs[2]:
-    render_parameter_ui(
-        file_name='rata_rata_persentase_hs_2021_2025.xlsx',
-        title='Distribusi Persentase Tinggi Awan (Cloud Height)',
-        y_label='Persentase (%)',
-        variable_label='Rentang Tinggi (ft)'
-    )
+    st.markdown("### 3. Distribusi Persentase Cloud Height (HS) Bulanan")
+    file_hs = 'rata_rata_persentase_hs_2021_2025.xlsx'
+    df_hs, _ = load_acs_generic_data(file_hs)
+    
+    if df_hs is not None and not df_hs.empty:
+        fig_hs = plot_meteogram(df_hs, "Meteogram Tinggi Awan", "Persentase (%)", "Tinggi Dasar Awan (ft)")
+        st.plotly_chart(fig_hs, use_container_width=True)
+        st.dataframe(df_hs.style.format("{:.2f}"), use_container_width=True)
+    else:
+        st.info(f"💡 File `data/{file_hs}` tidak ditemukan atau strukturnya tidak sesuai.")
 
+# --- TAB 4: WIND SPEED (WS) ---
 with tabs[3]:
-    render_parameter_ui(
-        file_name='rata_rata_persentase_ws_2021_2025.xlsx',
-        title='Distribusi Persentase Kecepatan Angin',
-        y_label='Persentase (%)',
-        variable_label='Kecepatan Angin (knots)'
-    )
+    st.markdown("### 4. Distribusi Persentase Wind Speed Bulanan")
+    file_ws = 'rata_rata_persentase_ws_2021_2025.xlsx'
+    df_ws, _ = load_acs_generic_data(file_ws)
+    
+    if df_ws is not None and not df_ws.empty:
+        # Transformasi bentuk data ke format 'long' agar optimal untuk visualisasi distribusi frekuensi
+        df_ws_long = df_ws.reset_index().rename(columns={'index': 'Bulan'}).melt(id_vars='Bulan', var_name='Kategori_WS', value_name='Persentase')
+        
+        # Menggunakan grafik batang bertumpuk (Stacked Bar) sebagai representasi distribusi frekuensi arah/kecepatan angin bulanan yang sangat interaktif
+        fig_ws = px.bar(df_ws_long, x='Bulan', y='Persentase', color='Kategori_WS',
+                        title="Distribusi Persentase Klasifikasi Kecepatan Angin",
+                        labels={'Persentase': 'Persentase (%)', 'Kategori_WS': 'Rentang Kecepatan / Arah'},
+                        template="plotly_white")
+        fig_ws.update_layout(height=500, barmode='stack', plot_bgcolor='rgba(0,0,0,0)')
+        
+        st.plotly_chart(fig_ws, use_container_width=True)
+        st.dataframe(df_ws.style.format("{:.2f}"), use_container_width=True)
+    else:
+        st.info(f"💡 File `data/{file_ws}` tidak ditemukan atau strukturnya tidak sesuai.")
 
+# --- TAB 5: RELATIVE HUMIDITY (RH) ---
 with tabs[4]:
-    render_parameter_ui(
-        file_name='rata_rata_jumlah_kejadian_masuk_rh_2021_2025.xlsx',
-        title='Rata-rata Kejadian Relative Humidity (RH)',
-        y_label='Jumlah Kejadian',
-        variable_label='Rentang Kelembapan (%)'
-    )
+    st.markdown("### 5. Distribusi Persentase Relative Humidity (RH) Bulanan")
+    file_rh = 'rata_rata_jumlah_kejadian_masuk_rh_2021_2025.xlsx'
+    df_rh, _ = load_acs_generic_data(file_rh)
+    
+    if df_rh is not None and not df_rh.empty:
+        fig_rh = plot_meteogram(df_rh, "Meteogram Kelembaban Udara (RH)", "Persentase (%)", "Rentang Kelembaban (%)")
+        st.plotly_chart(fig_rh, use_container_width=True)
+        st.dataframe(df_rh.style.format("{:.2f}"), use_container_width=True)
+    else:
+        st.info(f"💡 File `data/{file_rh}` tidak ditemukan atau strukturnya tidak sesuai.")
 
+# --- TAB 6: TEMPERATUR MAKSIMUM & MINIMUM ---
 with tabs[5]:
-    render_parameter_ui(
-        file_name='rata_rata_jumlah_kejadian_masuk_tmaxmin_2021_2025.xlsx',
-        title='Rata-rata Kejadian Suhu Maksimum dan Minimum',
-        y_label='Jumlah Kejadian',
-        variable_label='Kategori Suhu (°C)'
-    )
+    st.markdown("### 6. Distribusi Persentase Temperatur Maksimum & Minimum Bulanan")
+    file_tmaxmin = 'rata_rata_jumlah_kejadian_masuk_tmaxmin_2021_2025.xlsx'
+    df_tmaxmin, _ = load_acs_generic_data(file_tmaxmin)
+    
+    if df_tmaxmin is not None and not df_tmaxmin.empty:
+        fig_tmaxmin = plot_meteogram(df_tmaxmin, "Meteogram Ekstremitas Suhu (Tmax/Tmin)", "Persentase (%)", "Kategori Suhu (°C)")
+        st.plotly_chart(fig_tmaxmin, use_container_width=True)
+        st.dataframe(df_tmaxmin.style.format("{:.2f}"), use_container_width=True)
+    else:
+        st.info(f"💡 File `data/{file_tmaxmin}` tidak ditemukan atau strukturnya tidak sesuai.")
