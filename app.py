@@ -264,7 +264,7 @@ elif menu == "6. Rata-rata Persentase HS":
             hovermode="x unified"
         )
         st.plotly_chart(fig, use_container_width=True)
-        render_neat_table(df, "Ringkasan Rata-rata Persentase HS 2021–2025")============
+        render_neat_table(df, "Ringkasan Rata-rata Persentase HS 2021–2025")
 st.set_page_config(page_title="Tactical Weather Dashboard ACS", layout="wide", page_icon="🌤️")
 st.title("🌤️ Tactical Weather Dashboard - ACS")
 st.markdown("Visualisasi dan Analisis Data Aerodrome Climatological Summary (ACS) Tahun 2021-2025.")
